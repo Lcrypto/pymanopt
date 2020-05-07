@@ -22,4 +22,4 @@ project.
 Pymanopt is distributed under the open source [3-clause BSD
 license](https://github.com/pymanopt/pymanopt/blob/master/).
 
-fixed autodiff to support tensorflow ver 2 and higher
+Fixed autodiff initialization to support tensorflow ver 2 and higher

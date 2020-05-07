@@ -1,125 +1,98 @@
 """
 Module containing functions to differentiate functions using tensorflow.
 """
-import itertools
-
 try:
-    import tensorflow as tf
+   #correction of autodiff tensorflow import for version 2
+    import tensorflow.compat.v1  as tf
+    tf.disable_v2_behavior()
+    try:
+        from tensorflow.python.ops.gradients import _hessian_vector_product
+    except ImportError:
+        from tensorflow.python.ops.gradients_impl import \
+            _hessian_vector_product
 except ImportError:
     tf = None
 
-from ._backend import Backend
-from .. import make_graph_backend_decorator
-from ...tools import bisect_sequence, unpack_singleton_sequence_return_value
+from ._backend import Backend, assert_backend_available
 
 
-class _TensorFlowBackend(Backend):
-    def __init__(self, **kwargs):
-        self._own_session = None
+class TensorflowBackend(Backend):
+    def __init__(self):
+        if tf is not None:
+            self._session = tf.Session()
 
-        if self.is_available():
-            self._session = kwargs.get("session")
-            if self._session is None:
-                self._own_session = self._session = tf.Session()
-        super().__init__("TensorFlow")
+    def __str__(self):
+        return "tensorflow"
 
-    def __del__(self):
-        if self._own_session is not None:
-            self._own_session.close()
-            self._session = self._own_session = None
-
-    @staticmethod
-    def is_available():
+    def is_available(self):
         return tf is not None
 
-    @Backend._assert_backend_available
-    def is_compatible(self, function, arguments):
-        if not isinstance(function, tf.Tensor):
-            return False
-        return all([isinstance(argument, tf.Variable)
-                    for argument in arguments])
+    @assert_backend_available
+    def is_compatible(self, objective, argument):
+        if isinstance(objective, tf.Tensor):
+            if (argument is None or not
+                isinstance(argument, tf.Variable) and not
+                all([isinstance(arg, tf.Variable)
+                     for arg in argument])):
+                raise ValueError(
+                    "Tensorflow backend requires an argument (or sequence of "
+                    "arguments) with respect to which compilation is to be "
+                    "carried out")
+            return True
+        return False
 
-    @Backend._assert_backend_available
-    def compile_function(self, function, variables):
-        def compiled_function(*args):
-            feed_dict = {
-                variable: argument
-                for variable, argument in zip(variables, args)
-            }
-            return self._session.run(function, feed_dict)
-        return compiled_function
+    @assert_backend_available
+    def compile_function(self, objective, argument):
+        if not isinstance(argument, list):
 
-    @staticmethod
-    def _gradients(function, arguments):
-        return tf.gradients(function, arguments,
-                            unconnected_gradients=tf.UnconnectedGradients.ZERO)
+            def func(x):
+                feed_dict = {argument: x}
+                return self._session.run(objective, feed_dict)
+        else:
 
-    @Backend._assert_backend_available
-    def compute_gradient(self, function, variables):
-        gradients = self._gradients(function, variables)
+            def func(x):
+                feed_dict = {i: d for i, d in zip(argument, x)}
+                return self._session.run(objective, feed_dict)
 
-        def gradient(*args):
-            feed_dict = {
-                variable: argument
-                for variable, argument in zip(variables, args)
-            }
-            return self._session.run(gradients, feed_dict)
-        if len(variables) == 1:
-            return unpack_singleton_sequence_return_value(gradient)
-        return gradient
+        return func
 
-    @staticmethod
-    def _hessian_vector_product(function, arguments, vectors):
-        """Multiply the Hessian of `function` w.r.t. `arguments` by `vectors`.
-
-        Notes
-        -----
-        The implementation of this method is based on TensorFlow's
-        '_hessian_vector_product' [1]_. The (private) '_hessian_vector_product'
-        TensorFlow function replaces unconnected gradients with None, which
-        results in exceptions when a function depends linearly on one of its
-        inputs. Instead, we here allow unconnected gradients to be zero.
-
-        References
-        ----------
-        [1] https://git.io/JvmrW
+    @assert_backend_available
+    def compute_gradient(self, objective, argument):
         """
+        Compute the gradient of 'objective' and return as a function.
+        """
+        tfgrad = tf.gradients(objective, argument)
 
-        # Validate the input
-        num_arguments = len(arguments)
-        assert len(vectors) == num_arguments
+        if not isinstance(argument, list):
 
-        # First backprop
-        gradients = _TensorFlowBackend._gradients(function, arguments)
+            def grad(x):
+                feed_dict = {argument: x}
+                return self._session.run(tfgrad[0], feed_dict)
 
-        assert len(gradients) == num_arguments
-        element_wise_products = [
-            tf.multiply(gradient, tf.stop_gradient(vector))
-            for gradient, vector in zip(gradients, vectors)
-            if gradient is not None
-        ]
+        else:
 
-        # Second backprop
-        return _TensorFlowBackend._gradients(element_wise_products, arguments)
+            def grad(x):
+                feed_dict = {i: d for i, d in zip(argument, x)}
+                return self._session.run(tfgrad, feed_dict)
 
-    @Backend._assert_backend_available
-    def compute_hessian_vector_product(self, function, variables):
-        zeros = [tf.zeros_like(variable) for variable in variables]
-        hessian = self._hessian_vector_product(function, variables, zeros)
+        return grad
 
-        def hessian_vector_product(*args):
-            arguments, vectors = bisect_sequence(args)
-            feed_dict = {
-                variable: argument
-                for variable, argument in zip(
-                    itertools.chain(variables, zeros),
-                    itertools.chain(arguments, vectors))
-            }
-            return self._session.run(hessian, feed_dict)
-        if len(variables) == 1:
-            return unpack_singleton_sequence_return_value(
-                hessian_vector_product)
-        return hessian_vector_product
+    @assert_backend_available
+    def compute_hessian(self, objective, argument):
+        if not isinstance(argument, list):
+            argA = tf.zeros_like(argument)
+            tfhess = _hessian_vector_product(objective, [argument], [argA])
 
+            def hess(x, a):
+                feed_dict = {argument: x, argA: a}
+                return self._session.run(tfhess[0], feed_dict)
 
-TensorFlow = make_graph_backend_decorator(_TensorFlowBackend)
+        else:
+            argA = [tf.zeros_like(arg) for arg in argument]
+            tfhess = _hessian_vector_product(objective, argument, argA)
+
+            def hess(x, a):
+                feed_dict = {i: d for i, d in zip(argument+argA, x+a)}
+                return self._session.run(tfhess, feed_dict)
+
+        return hess
